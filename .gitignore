@@ -1,0 +1,22 @@
+# R session files
+.Rhistory
+.Rproj.user
+.RData
+.Ruserdata
+*.Rproj
+
+# Data files (never commit customer data)
+*.csv
+*.csv.gz
+*.gz
+*.rds
+*.RDS
+*.xlsx
+
+# PDF reports
+*.pdf
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
