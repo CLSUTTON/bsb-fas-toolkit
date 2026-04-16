@@ -4,7 +4,7 @@ GUI-based quality control toolkit for CosMx SMI flat file exports. Wraps publish
 
 ## What it does
 
-Upload two flat files from AtoMx, select your panel, click Run. The toolkit performs two levels of QC and produces an interactive report plus a downloadable PDF.
+Upload two flat files from AtoMx, select your panel, click Run. The toolkit performs three levels of QC, produces an interactive report plus a downloadable PDF, and exports analysis-ready filtered flat files.
 
 ### FOV-Level QC
 Identifies FOVs with low overall signal or biased reporter cycle expression compared to spatially similar regions. For each FOV, a 7x7 grid is placed across the tissue. Each grid square is compared to the 10 most similar squares in other FOVs. FOVs are flagged for:
@@ -21,7 +21,10 @@ Flags individual cells that should be excluded from downstream analysis:
 Cell QC thresholds update reactively — adjust them after the initial run and see results instantly without re-running the FOV QC computation.
 
 ### Combined QC Summary
-Merges FOV-level and cell-level flags into a single report with color-coded severity badges, spatial flag maps, and a total counts-over-space visualization.
+Merges FOV-level and cell-level flags into a single report with color-coded severity badges, spatial flag maps, and descriptive QC visualizations: total counts over space and spatially-smoothed background (negprobe/RNA ratio averaged over each cell's 50 nearest neighbors).
+
+### Filtered Data Export
+One-click export of QC-passing cells to gzipped CSV flat files, matching the same format as AtoMx exports. This is the hand-off point from QC to downstream analysis (Seurat, Giotto, AtoMx secondary analysis, or any other tool that consumes CosMx flat files).
 
 ## Quick start
 
@@ -32,6 +35,7 @@ Merges FOV-level and cell-level flags into a single report with color-coded seve
 5. Click **Run QC**.
 6. Review results across the three tabs: FOV QC, Cell QC, QC Summary.
 7. Click **Save PDF to Desktop** for a shareable report.
+8. Click **Export Filtered Data** to write QC-passing cells to Desktop as gzipped CSVs.
 
 ## Exporting data from AtoMx
 
@@ -81,9 +85,9 @@ The following packages are auto-installed on first run:
 | File | Required columns |
 |------|-----------------|
 | `*_exprMat_file.csv(.gz)` | `fov`, `cell_ID`, plus one column per gene |
-| `*_metadata_file.csv(.gz)` | `fov`, `cell_ID`, spatial coordinates (`x_slide_mm`/`y_slide_mm` or `CenterX_global_px`/`CenterY_global_px`), `nCount_RNA` (optional), `Area` (optional) |
+| `*_metadata_file.csv(.gz)` | `fov`, `cell_ID`, spatial coordinates (`x_slide_mm`/`y_slide_mm` or `CenterX_global_px`/`CenterY_global_px`), `nCount_RNA` (optional), `Area` (optional), `nCount_negprobes` (optional) |
 
-Both compressed (.csv.gz) and uncompressed (.csv) files are supported. The toolkit auto-detects coordinate systems and handles missing `nCount_RNA` (computed from expression matrix) and missing `Area` (area filtering skipped) gracefully.
+Both compressed (.csv.gz) and uncompressed (.csv) files are supported. The toolkit auto-detects coordinate systems and handles missing optional columns gracefully: `nCount_RNA` is computed from the expression matrix if absent, area filtering is skipped if `Area` is missing, and the smoothed background plot shows a clear message if `nCount_negprobes` is unavailable.
 
 ## Output
 
@@ -107,8 +111,18 @@ Three tabs with sub-tabs:
 - Combined text summary
 - All-flags spatial map
 - Counts-over-space heatmap (viridis)
+- Spatially-smoothed background (viridis)
 
-### PDF report (8 pages)
+### Filtered data export
+
+Two gzipped CSV files written to Desktop, containing only QC-passing cells:
+
+- `{ExptName}_exprMat_filtered.csv.gz` — expression matrix with `fov`, `cell_ID`, and all gene columns
+- `{ExptName}_metadata_filtered.csv.gz` — full metadata preserving all original columns
+
+Format matches AtoMx exports, so filtered files can be fed directly back into any downstream workflow that accepts flat files.
+
+### PDF report (9 pages)
 
 | Page | Contents |
 |------|----------|
@@ -120,6 +134,9 @@ Three tabs with sub-tabs:
 | 6 | Cell QC: count distribution histogram |
 | 7 | Cell QC: area distribution histogram |
 | 8 | Counts over space (viridis heatmap) |
+| 9 | Spatially-smoothed background over space (viridis heatmap) |
+
+**File-lock safety**: If the target PDF is already open in RStudio's viewer or another PDF reader, the toolkit detects this before attempting to write and falls back to a timestamped filename (`{ExptName}_QC_Report_YYYYMMDD_HHMMSS.pdf`). The status message alerts you when a fallback was used. Same logic applies to the filtered CSV exports.
 
 ## QC thresholds
 
@@ -151,13 +168,14 @@ Count threshold defaults are panel-specific and update automatically when the pa
 - **Cell flag rate 10-20%**: Worth investigating. Check if flags are spatially clustered (technical) or dispersed (biological).
 - **Cell flag rate >20%**: Likely a tissue quality or segmentation issue. Review in AtoMx tissue viewer.
 - **Counts-over-space plot**: Look for sharp FOV-boundary artifacts (technical) vs smooth spatial gradients (biological). Smooth gradients are expected.
+- **Smoothed background plot**: Elevated background (>5x median) often indicates necrosis or tissue damage. Isolated hotspots don't require action but are useful to remember when interpreting downstream results in those regions.
 - **10th percentile cap triggered**: Indicates the default threshold would flag >10% of cells. The dataset may have generally lower signal — check tissue quality.
 
 ## Roadmap
 
 - [x] Phase 1: FOV QC (signal loss + reporter bias)
 - [x] Phase 2: Cell-level QC (count + area thresholds)
-- [ ] Phase 3: Descriptive QC visualizations (spatially smoothed background)
+- [x] Phase 3: Descriptive QC (smoothed background) + filtered data export
 - [ ] Phase 4: Normalization preview
 
 ## References

@@ -2,6 +2,7 @@
 ## CosMx QC Toolkit - Shiny App
 ## Phase 1: FOV QC (signal loss + reporter bias)
 ## Phase 2: Cell-level QC (count threshold + area threshold)
+## Phase 3: Smoothed background visualization + filtered data export
 ##
 ## Launch with: shiny::runApp("path/to/this/folder")
 ## Or just open this file in RStudio and click "Run App"
@@ -22,6 +23,26 @@ library(Matrix)
 library(pheatmap)
 library(scales)
 library(viridis)
+library(FNN)
+
+# -- Helper: get a writable PDF path, falling back to timestamp if locked -----
+# Solves the Windows file-lock problem when the destination PDF is already
+# open in RStudio's viewer or another PDF reader. Trying to open a file for
+# writing will fail fast if the lock is held, so we detect that BEFORE
+# calling pdf() and fall back to a timestamped filename instead.
+get_writable_pdf_path <- function(preferred_path) {
+  con <- try(file(preferred_path, open = "wb"), silent = TRUE)
+  if (!inherits(con, "try-error")) {
+    close(con)
+    return(list(path = preferred_path, fallback_used = FALSE))
+  }
+  dir_part  <- dirname(preferred_path)
+  base_part <- tools::file_path_sans_ext(basename(preferred_path))
+  ext_part  <- tools::file_ext(preferred_path)
+  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  fallback  <- file.path(dir_part, paste0(base_part, "_", timestamp, ".", ext_part))
+  return(list(path = fallback, fallback_used = TRUE))
+}
 
 # -- Source FOV QC functions from GitHub --------------------------------------
 source("https://raw.githubusercontent.com/Nanostring-Biostats/CosMx-Analysis-Scratch-Space/Main/_code/FOV%20QC/FOV%20QC%20utils.R")
@@ -195,7 +216,13 @@ ui <- fluidPage(
         br(), br(),
         actionButton("save_pdf", "Save PDF to Desktop", 
                      style = "width:100%; margin-top:5px; background:#2d6a4f; color:white; border:none; padding:12px; border-radius:6px; font-size:14px;"),
-        uiOutput("pdf_status")
+        uiOutput("pdf_status"),
+        br(),
+        actionButton("export_filtered", "Export Filtered Data",
+                     style = "width:100%; margin-top:5px; background:#52796f; color:white; border:none; padding:12px; border-radius:6px; font-size:14px;"),
+        helpText("Writes QC-passing cells to Desktop as counts_filtered.csv.gz and metadata_filtered.csv.gz.",
+                 style = "font-size:11px; margin-top:4px;"),
+        uiOutput("export_status")
       )
     ),
     
@@ -250,7 +277,8 @@ ui <- fluidPage(
             verbatimTextOutput("combined_summary_text"),
             tabsetPanel(id = "summary_plot_tabs", type = "tabs",
               tabPanel("All Flags (Spatial)", plotOutput("plot_combined_spatial", height = "500px")),
-              tabPanel("Counts Over Space",   plotOutput("plot_counts_spatial",  height = "500px"))
+              tabPanel("Counts Over Space",   plotOutput("plot_counts_spatial",  height = "500px")),
+              tabPanel("Smoothed Background", plotOutput("plot_smoothed_bg",     height = "500px"))
             )
           )
         )
@@ -277,7 +305,12 @@ server <- function(input, output, session) {
     fov         = NULL,     # fov vector
     nCount_RNA  = NULL,     # total counts per cell
     cell_area   = NULL,     # cell areas
-    total_cells = NULL      # total cell count
+    total_cells = NULL,     # total cell count
+    
+    # Phase 3: Smoothed background + filtered export
+    nCount_negprobes = NULL,  # total negprobe counts per cell (for smoothed background)
+    smoothed_bg      = NULL,  # cached smoothed background vector
+    counts_final     = NULL   # retained sparse counts matrix for filtered export
   )
   
   # -- Update default count threshold when panel changes -----------------------
@@ -367,6 +400,19 @@ server <- function(input, output, session) {
         } else {
           rv$cell_area <- NULL
         }
+        
+        # Phase 3: Extract negprobe counts if present (for smoothed background plot)
+        if ("nCount_negprobes" %in% colnames(obs)) {
+          rv$nCount_negprobes <- obs$nCount_negprobes
+        } else {
+          rv$nCount_negprobes <- NULL
+        }
+        
+        # Phase 3: Retain counts matrix for filtered export
+        rv$counts_final <- counts.final
+        
+        # Reset smoothed background cache (recomputed on demand)
+        rv$smoothed_bg <- NULL
         
         # --- Run FOV QC ---
         incProgress(0.2, detail = "Running FOV QC algorithm (this takes a few minutes)...")
@@ -754,6 +800,85 @@ server <- function(input, output, session) {
   })
   
   # ============================================================================
+  # PHASE 3: Smoothed background over space (descriptive QC from vignette §4.3)
+  # Uses FNN::get.knn to compute 50 nearest neighbors per cell, then averages
+  # the totalcount-normalized negprobe rate across each cell's neighborhood.
+  # Results are cached in rv$smoothed_bg so the expensive KNN lookup only runs
+  # once per dataset rather than on every tab click.
+  # ============================================================================
+  smoothed_background <- reactive({
+    req(rv$ready, rv$xy, rv$nCount_RNA)
+    
+    # Return cached result if available
+    if (!is.null(rv$smoothed_bg)) return(rv$smoothed_bg)
+    
+    # Can't compute without negprobe counts
+    if (is.null(rv$nCount_negprobes)) return(NULL)
+    
+    # Compute per-cell background rate, normalized by total RNA counts
+    # Guard against division by zero
+    total_counts_safe <- pmax(rv$nCount_RNA, 1)
+    bg_rate <- rv$nCount_negprobes / total_counts_safe
+    
+    # Compute 50 nearest neighbors in xy space
+    xy_mat <- as.matrix(rv$xy)
+    knn <- FNN::get.knn(xy_mat, k = 50)
+    
+    # For each cell, average bg_rate over its 50 neighbors (plus itself)
+    # knn$nn.index is N x 50 matrix of neighbor indices
+    neighbor_bg <- matrix(bg_rate[knn$nn.index], 
+                          nrow = length(bg_rate), 
+                          ncol = 50)
+    smoothed <- (rowMeans(neighbor_bg) * 50 + bg_rate) / 51
+    
+    # Cache and return
+    rv$smoothed_bg <- smoothed
+    smoothed
+  })
+  
+  output$plot_smoothed_bg <- renderPlot({
+    req(rv$ready, rv$xy)
+    
+    smoothed <- smoothed_background()
+    
+    if (is.null(smoothed)) {
+      plot.new()
+      text(0.5, 0.55, "No 'nCount_negprobes' column found in metadata",
+           cex = 1.4, font = 2)
+      text(0.5, 0.45, "Smoothed background plot requires negprobe counts.",
+           cex = 1.0, col = "grey40")
+      text(0.5, 0.38, "This column is included in standard AtoMx exports.",
+           cex = 1.0, col = "grey40")
+      return()
+    }
+    
+    xy <- rv$xy
+    
+    # Scale to 0.9995 quantile per vignette approach to clip outliers
+    q_high <- quantile(smoothed, 0.9995, na.rm = TRUE)
+    scaled <- round(1 + 100 * pmin(smoothed / q_high, 1))
+    scaled <- pmax(1, pmin(101, scaled))
+    
+    pal <- viridis::viridis(101, option = "B")
+    
+    par(mar = c(1, 1, 3, 1))
+    plot(xy[, 1], xy[, 2], pch = 16, cex = 0.1, asp = 1,
+         col = pal[scaled],
+         xlab = "", ylab = "", xaxt = "n", yaxt = "n",
+         main = "Spatially Smoothed Background (negprobe / total counts)")
+    
+    # Legend shows multiples of median for interpretability
+    med_bg <- median(smoothed, na.rm = TRUE)
+    legend_mults <- c(0.5, 1, 2, 5, 10)
+    legend_vals <- signif(med_bg * legend_mults, 2)
+    legend_scaled <- pmax(1, pmin(101, round(1 + 100 * pmin(legend_vals / q_high, 1))))
+    legend("bottomright", pch = 16, cex = 0.9,
+           col = c("white", pal[legend_scaled]),
+           legend = c("x median background:", paste0(legend_mults, "x")),
+           bg = "white")
+  })
+  
+  # ============================================================================
   # SAVE PDF REPORT (updated for Phase 2)
   # ============================================================================
   observeEvent(input$save_pdf, {
@@ -771,7 +896,14 @@ server <- function(input, output, session) {
     desktop_path <- file.path(Sys.getenv("USERPROFILE"), "Desktop")
     if (!dir.exists(desktop_path)) desktop_path <- file.path(path.expand("~"), "Desktop")
     if (!dir.exists(desktop_path)) desktop_path <- path.expand("~")
-    output_pdf <- file.path(desktop_path, paste0(expt_name, "_QC_Report.pdf"))
+    preferred_pdf <- file.path(desktop_path, paste0(expt_name, "_QC_Report.pdf"))
+    
+    # Phase 3: check for file lock (e.g. PDF open in RStudio viewer) BEFORE
+    # calling pdf(). If locked, fall back to a timestamped filename so we
+    # never fail silently or produce a corrupt PDF.
+    path_info <- get_writable_pdf_path(preferred_pdf)
+    output_pdf    <- path_info$path
+    fallback_used <- path_info$fallback_used
     
     tryCatch({
       pdf(output_pdf, width = 14, height = 10)
@@ -873,11 +1005,41 @@ server <- function(input, output, session) {
       legend("bottomright", pch = 16, col = c("white", pal[ls]),
              legend = c("Counts:", lv), bg = "white")
       
+      # ---- Page 9: Smoothed background over space (Phase 3) ----
+      smoothed <- smoothed_background()
+      if (!is.null(smoothed)) {
+        q_high <- quantile(smoothed, 0.9995, na.rm = TRUE)
+        sc_bg  <- pmax(1, pmin(101, round(1 + 100 * pmin(smoothed / q_high, 1))))
+        par(mar = c(1, 1, 3, 1))
+        plot(xy[, 1], xy[, 2], pch = 16, cex = 0.1, asp = 1,
+             col = pal[sc_bg], xlab = "", ylab = "", xaxt = "n", yaxt = "n",
+             main = "Spatially Smoothed Background (negprobe / total counts)")
+        med_bg <- median(smoothed, na.rm = TRUE)
+        lm_mults <- c(0.5, 1, 2, 5, 10)
+        lm_vals <- signif(med_bg * lm_mults, 2)
+        lm_sc <- pmax(1, pmin(101, round(1 + 100 * pmin(lm_vals / q_high, 1))))
+        legend("bottomright", pch = 16, cex = 0.9,
+               col = c("white", pal[lm_sc]),
+               legend = c("x median background:", paste0(lm_mults, "x")),
+               bg = "white")
+      } else {
+        plot.new()
+        text(0.5, 0.5, "Smoothed background unavailable (no nCount_negprobes column)",
+             cex = 1.3)
+      }
+      
       dev.off()
       
       output$pdf_status <- renderUI({
-        div(style = "color:#2d6a4f; font-weight:bold; padding:8px 0; font-size:13px;",
-            paste("PDF saved to:", output_pdf))
+        if (fallback_used) {
+          div(style = "color:#d68910; font-weight:bold; padding:8px 0; font-size:13px;",
+              HTML(paste0("Original PDF was open in another program.<br>",
+                          "Saved with timestamp instead:<br>",
+                          "<span style='font-weight:normal;'>", output_pdf, "</span>")))
+        } else {
+          div(style = "color:#2d6a4f; font-weight:bold; padding:8px 0; font-size:13px;",
+              paste("PDF saved to:", output_pdf))
+        }
       })
       
     }, error = function(e) {
@@ -885,6 +1047,102 @@ server <- function(input, output, session) {
       output$pdf_status <- renderUI({
         div(style = "color:red; padding:8px 0; font-size:13px;",
             paste("Error saving PDF:", e$message))
+      })
+    })
+  })
+  
+  # ============================================================================
+  # PHASE 3: Export filtered data (counts + metadata) as gzipped CSVs
+  # Writes QC-passing cells to the user's Desktop, matching the same flat-file
+  # format as AtoMx exports. This is the hand-off point from QC to downstream
+  # analysis (Seurat, Giotto, AtoMx secondary analysis, etc).
+  # ============================================================================
+  observeEvent(input$export_filtered, {
+    req(rv$ready, rv$counts_final, rv$obs)
+    
+    qc <- cell_qc()
+    keep_idx <- !qc$flag_any
+    n_keep <- sum(keep_idx)
+    
+    if (n_keep == 0) {
+      output$export_status <- renderUI({
+        div(style = "color:red; padding:8px 0; font-size:13px;",
+            "Cannot export: all cells flagged. Loosen thresholds.")
+      })
+      return()
+    }
+    
+    # Resolve Desktop path (same logic as PDF save)
+    desktop_path <- file.path(Sys.getenv("USERPROFILE"), "Desktop")
+    if (!dir.exists(desktop_path)) desktop_path <- file.path(path.expand("~"), "Desktop")
+    if (!dir.exists(desktop_path)) desktop_path <- path.expand("~")
+    
+    expt_name <- rv$expt_name
+    counts_out_preferred <- file.path(
+      desktop_path,
+      paste0(expt_name, "_exprMat_filtered.csv.gz"))
+    meta_out_preferred <- file.path(
+      desktop_path,
+      paste0(expt_name, "_metadata_filtered.csv.gz"))
+    
+    # Apply the same file-lock safety check we use for PDFs
+    counts_info <- get_writable_pdf_path(counts_out_preferred)
+    meta_info   <- get_writable_pdf_path(meta_out_preferred)
+    counts_out  <- counts_info$path
+    meta_out    <- meta_info$path
+    fallback_used <- counts_info$fallback_used || meta_info$fallback_used
+    
+    withProgress(message = "Exporting filtered data...", value = 0, {
+      tryCatch({
+        incProgress(0.2, detail = "Subsetting counts matrix...")
+        
+        # Subset counts - retain original fov/cell_ID columns by rebuilding
+        # from metadata rather than the sparse matrix (which dropped them)
+        counts_sparse_kept <- rv$counts_final[keep_idx, , drop = FALSE]
+        
+        incProgress(0.3, detail = "Converting to dense for export...")
+        # Densify only the kept cells - memory hit is bounded by filtered size
+        counts_dense <- as.matrix(counts_sparse_kept)
+        
+        # Prepend fov + cell_ID columns to match AtoMx flat-file format
+        meta_kept <- rv$obs[keep_idx, , drop = FALSE]
+        counts_df <- data.frame(
+          fov     = meta_kept$fov,
+          cell_ID = meta_kept$cell_ID,
+          counts_dense,
+          check.names = FALSE
+        )
+        
+        incProgress(0.3, detail = "Writing gzipped CSVs to Desktop...")
+        data.table::fwrite(counts_df, counts_out, compress = "gzip")
+        data.table::fwrite(meta_kept, meta_out, compress = "gzip")
+        
+        incProgress(0.2, detail = "Done!")
+        
+        n_total  <- length(keep_idx)
+        n_flag   <- sum(!keep_idx)
+        pct_kept <- round(100 * n_keep / n_total, 1)
+        
+        output$export_status <- renderUI({
+          prefix <- if (fallback_used) {
+            "Files were open elsewhere - saved with timestamp instead.<br>"
+          } else ""
+          div(style = "color:#2d6a4f; font-weight:bold; padding:8px 0; font-size:13px;",
+              HTML(paste0(
+                prefix,
+                "Exported ", format(n_keep, big.mark = ","), " of ",
+                format(n_total, big.mark = ","), " cells (", pct_kept, "% kept).<br>",
+                "<span style='font-weight:normal;'>",
+                basename(counts_out), "<br>", basename(meta_out),
+                "</span>"
+              )))
+        })
+        
+      }, error = function(e) {
+        output$export_status <- renderUI({
+          div(style = "color:red; padding:8px 0; font-size:13px;",
+              paste("Export error:", e$message))
+        })
       })
     })
   })
