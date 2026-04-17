@@ -8,12 +8,12 @@
 ## Or just open this file in RStudio and click "Run App"
 ## ============================================================================
 
-# -- Max file upload size (500MB to handle large exprMat files) ---------------
-options(shiny.maxRequestSize = 500 * 1024^2)
+# -- Max file upload size (8GB to handle large exprMat files) ----------------
+options(shiny.maxRequestSize = 8 * 1024^3)
 
 # -- Install/load packages ----------------------------------------------------
 required_pkgs <- c("shiny", "data.table", "Matrix", "FNN", "pheatmap", 
-                   "scales", "grDevices", "viridis")
+                   "scales", "grDevices")
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
 }
@@ -22,7 +22,6 @@ library(data.table)
 library(Matrix)
 library(pheatmap)
 library(scales)
-library(viridis)
 library(FNN)
 
 # -- Helper: get a writable PDF path, falling back to timestamp if locked -----
@@ -201,7 +200,7 @@ ui <- fluidPage(
         numericInput("count_threshold", 
                      "Min counts per cell:",
                      value = 50, min = 1, max = 1000, step = 10),
-        helpText("Recommended: 20 for 1K panels, 50 for 6K, 100-200 for WTX. ",
+        helpText("Recommended: 20 for 1K panels, 50 for 6K. ",
                  "Auto-capped at 10th percentile to prevent over-filtering."),
         numericInput("area_threshold",
                      "Max cell area (pixels):",
@@ -783,7 +782,7 @@ server <- function(input, output, session) {
     scaled <- round(1 + 100 * (log_counts - log_min) / (log_max - log_min))
     scaled <- pmax(1, pmin(101, scaled))
     
-    pal <- viridis::viridis(101, option = "B")
+    pal <- scales::viridis_pal(option = "B")(101)
     
     par(mar = c(1, 1, 3, 1))
     plot(xy[, 1], xy[, 2], pch = 16, cex = 0.1, asp = 1,
@@ -859,7 +858,7 @@ server <- function(input, output, session) {
     scaled <- round(1 + 100 * pmin(smoothed / q_high, 1))
     scaled <- pmax(1, pmin(101, scaled))
     
-    pal <- viridis::viridis(101, option = "B")
+    pal <- scales::viridis_pal(option = "B")(101)
     
     par(mar = c(1, 1, 3, 1))
     plot(xy[, 1], xy[, 2], pch = 16, cex = 0.1, asp = 1,
@@ -995,7 +994,7 @@ server <- function(input, output, session) {
       log_min <- log2(10); log_max <- log2(5000)
       log_c <- log2(pmax(pmin(rv$nCount_RNA, 5000), 10))
       sc <- pmax(1, pmin(101, round(1 + 100 * (log_c - log_min) / (log_max - log_min))))
-      pal <- viridis::viridis(101, option = "B")
+      pal <- scales::viridis_pal(option = "B")(101)
       par(mar = c(1, 1, 3, 1))
       plot(xy[, 1], xy[, 2], pch = 16, cex = 0.1, asp = 1,
            col = pal[sc], xlab = "", ylab = "", xaxt = "n", yaxt = "n",
@@ -1030,8 +1029,29 @@ server <- function(input, output, session) {
       
       dev.off()
       
+      # Sanity-check the written PDF: partial writes (from crashes, memory
+      # pressure, or interrupted sessions) often produce files that exist
+      # on disk but are unreadable. Check size and warn the user explicitly.
+      pdf_size_mb <- file.info(output_pdf)$size / (1024^2)
+      
       output$pdf_status <- renderUI({
-        if (fallback_used) {
+        if (is.na(pdf_size_mb) || pdf_size_mb < 0.01) {
+          # Likely an incomplete/corrupt write (real PDFs are always > 10KB)
+          div(style = "color:red; font-weight:bold; padding:8px 0; font-size:13px;",
+              HTML(paste0("PDF file was not written correctly (size: ",
+                          round(pdf_size_mb * 1024, 1), " KB).<br>",
+                          "This usually means R ran out of memory or was interrupted ",
+                          "during PDF generation. Try closing other applications ",
+                          "and running again.")))
+        } else if (pdf_size_mb > 100) {
+          # Very large PDFs can choke some viewers - warn but don't block
+          div(style = "color:#d68910; font-weight:bold; padding:8px 0; font-size:13px;",
+              HTML(paste0("PDF saved to: ", output_pdf, "<br>",
+                          "<span style='font-weight:normal;'>Size: ",
+                          round(pdf_size_mb, 1), " MB - large PDFs may be slow or ",
+                          "fail to open in some viewers. Try Chrome or Edge if ",
+                          "Adobe Reader struggles.</span>")))
+        } else if (fallback_used) {
           div(style = "color:#d68910; font-weight:bold; padding:8px 0; font-size:13px;",
               HTML(paste0("Original PDF was open in another program.<br>",
                           "Saved with timestamp instead:<br>",

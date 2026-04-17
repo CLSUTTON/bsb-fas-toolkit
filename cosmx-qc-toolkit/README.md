@@ -66,7 +66,6 @@ The following packages are auto-installed on first run:
 - pheatmap
 - scales
 - grDevices
-- viridis
 
 ## Panel options
 
@@ -78,7 +77,7 @@ The following packages are auto-installed on first run:
 | `Mm_Neuro` | Mouse Neuroscience (1K)                    | 20                     |
 | `Mm_UCC`   | Mouse Universal Cell Characterization (1K) | 20                     |
 
-**Note**: The Human Whole Transcriptome (18K/WTX) panel and custom/RBS panels are not currently supported by the upstream barcode map file. WTX count threshold recommendation is 100-200. Contact Bioinformatics for the appropriate barcode map if using those panels.
+**Note**: The Human Whole Transcriptome (18K/WTX) panel is not currently supported. WTX barcode maps are available upstream, but the current loading path densifies the counts matrix during import, which exceeds memory capacity on typical hardware for 18K-plex datasets. Chunked loading is on the roadmap to address this. Custom/RBS panels are not supported until Bioinformatics publishes their corresponding barcode maps.
 
 ## Input files
 
@@ -176,7 +175,8 @@ Count threshold defaults are panel-specific and update automatically when the pa
 - [x] Phase 1: FOV QC (signal loss + reporter bias)
 - [x] Phase 2: Cell-level QC (count + area thresholds)
 - [x] Phase 3: Descriptive QC (smoothed background) + filtered data export
-- [ ] Phase 4: Normalization preview
+- [ ] Phase 4: Memory hardening — chunked loading + chunked export, enabling WTX support and improving reliability on FAS laptops
+- [ ] Phase 5: Normalization preview
 
 ## References
 
