@@ -7,8 +7,8 @@
 ## Or just open this file in RStudio and click "Run App"
 ## ============================================================================
 
-# -- Max file upload size (500MB to handle large exprMat files) ---------------
-options(shiny.maxRequestSize = 500 * 1024^2)
+# -- Max file upload size (8GB to handle WTX-sized exprMat files) ------------
+options(shiny.maxRequestSize = 8 * 1024^3)
 
 # -- Install/load packages ----------------------------------------------------
 required_pkgs <- c("shiny", "data.table", "Matrix", "FNN", "pheatmap", 
