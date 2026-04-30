@@ -70,10 +70,11 @@ The following packages are auto-installed on first run:
 | `Hs_IO`    | Human Immuno-Oncology (100-plex)           | 20                     |
 | `Hs_UCC`   | Human Universal Cell Characterization (1K) | 20                     |
 | `Hs_6k`    | Human 6K Discovery                         | 50                     |
+| `Hs_WTX`   | Human Whole Transcriptome (18K)            | 100                    |
 | `Mm_Neuro` | Mouse Neuroscience (1K)                    | 20                     |
 | `Mm_UCC`   | Mouse Universal Cell Characterization (1K) | 20                     |
 
-**Note**: The Human Whole Transcriptome (18K/WTX) panel and custom/RBS panels are not currently supported by the upstream barcode map file. WTX count threshold recommendation is 100-200. Contact Bioinformatics for the appropriate barcode map if using those panels.
+**Note**: Custom and RBS panels are not currently supported by the upstream barcode map file. Contact Bioinformatics for the appropriate barcode map if using those panels.
 
 ## Input files
 
@@ -157,8 +158,9 @@ Count threshold defaults are panel-specific and update automatically when the pa
 ### v0.2.0
 - Chunked expression matrix loading. Files now load in 5000-cell chunks, reducing peak memory usage on FAS laptops. Progress bar reports chunk number and running cell count during load.
 - Replaced viridis dependency with scales::viridis_pal() for the same colormap. Resolves S7 install failures reported on some machines.
+- Restored Hs_WTX (Human Whole Transcriptome, 18K) as a selectable panel with count threshold default of 100.
 - FOV QC threshold defaults remain at 0.7 per Bioinformatics guidance.
-- Output verified identical to v0.1 on the same input.
+- Output verified identical to v0.1 on reference datasets.
 
 ## Roadmap
 

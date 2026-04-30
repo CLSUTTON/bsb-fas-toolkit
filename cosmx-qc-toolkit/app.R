@@ -122,6 +122,7 @@ panel_count_defaults <- list(
   Hs_IO    = 20,   # 100-plex
   Hs_UCC   = 20,   # 1K
   Hs_6k    = 50,   # 6K
+  Hs_WTX   = 100,  # WTX (Human Whole Transcriptome, 18K-plex)
   Mm_Neuro = 20,   # 1K
   Mm_UCC   = 20    # 1K
 )
@@ -242,6 +243,7 @@ ui <- fluidPage(
         h4("2. Select Panel"),
         selectInput("panel", "Barcode Panel:",
                     choices = c("Human 6K Discovery" = "Hs_6k",
+                                "Human Whole Transcriptome (18K/WTX)" = "Hs_WTX",
                                 "Human Universal Cell Char (1K)" = "Hs_UCC",
                                 "Human Immuno-Oncology (100-plex)" = "Hs_IO",
                                 "Mouse Neuroscience (1K)" = "Mm_Neuro",
