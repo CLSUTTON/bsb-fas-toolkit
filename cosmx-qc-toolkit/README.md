@@ -158,7 +158,7 @@ Count threshold defaults are panel-specific and update automatically when the pa
 - Chunked expression matrix loading. Files now load in 5000-cell chunks, reducing peak memory usage on FAS laptops. Progress bar reports chunk number and running cell count during load.
 - Replaced viridis dependency with scales::viridis_pal() for the same colormap. Resolves S7 install failures reported on some machines.
 - FOV QC threshold defaults remain at 0.7 per Bioinformatics guidance.
-- Output verified identical to v0.1 on the same input (Liver TMA02, Liver TMA03).
+- Output verified identical to v0.1 on the same input.
 
 ## Roadmap
 
