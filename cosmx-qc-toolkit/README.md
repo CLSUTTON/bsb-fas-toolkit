@@ -4,7 +4,10 @@ GUI-based quality control toolkit for CosMx SMI flat file exports. Wraps publish
 
 ## What it does
 
-Upload two flat files from AtoMx, select your panel, click Run. The toolkit performs two levels of QC and produces an interactive report plus a downloadable PDF.
+Upload two flat files from AtoMx, select your panel, click Run. The toolkit produces an interactive report plus a downloadable PDF and CSV.
+
+### Run Summary
+A Bruker-style descriptive summary of the run at a glance: FOV count, tissue area, cell counts, transcript stats, control probe stats, and SNR. Toggle between Pre-QC (raw run) and Post-QC (final analysis) views. Exportable to CSV for downstream reporting.
 
 ### FOV-Level QC
 Identifies FOVs with low overall signal or biased reporter cycle expression compared to spatially similar regions. For each FOV, a 7x7 grid is placed across the tissue. Each grid square is compared to the 10 most similar squares in other FOVs. FOVs are flagged for:
@@ -30,8 +33,8 @@ Merges FOV-level and cell-level flags into a single report with color-coded seve
 3. Upload your expression matrix and metadata files.
 4. Select your panel and adjust thresholds if needed.
 5. Click **Run QC**.
-6. Review results across the three tabs: FOV QC, Cell QC, QC Summary.
-7. Click **Save PDF to Desktop** for a shareable report.
+6. Review results across the four tabs: Run Summary, FOV QC, Cell QC, QC Summary.
+7. Click **Save PDF to Desktop** for a shareable report, or use **Download CSV** on the Run Summary tab for the metrics table.
 
 ## Exporting data from AtoMx
 
@@ -80,16 +83,21 @@ The following packages are auto-installed on first run:
 
 | File | Required columns |
 |------|-----------------|
-| `*_exprMat_file.csv(.gz)` | `fov`, `cell_ID`, plus one column per gene |
-| `*_metadata_file.csv(.gz)` | `fov`, `cell_ID`, spatial coordinates (`x_slide_mm`/`y_slide_mm` or `CenterX_global_px`/`CenterY_global_px`), `nCount_RNA` (optional), `Area` (optional) |
+| `*_exprMat_file.csv(.gz)` | `fov`, `cell_ID`, plus one column per gene. Negative probes and SystemControl columns are used for Run Summary metrics. |
+| `*_metadata_file.csv(.gz)` | `fov`, `cell_ID`, spatial coordinates (`x_slide_mm`/`y_slide_mm` or `CenterX_global_px`/`CenterY_global_px`), `nCount_RNA` (optional), `nFeature_RNA` (optional), `Area` (optional) |
 
-Both compressed (.csv.gz) and uncompressed (.csv) files are supported. The toolkit auto-detects coordinate systems and handles missing `nCount_RNA` (computed from expression matrix) and missing `Area` (area filtering skipped) gracefully.
+Both compressed (.csv.gz) and uncompressed (.csv) files are supported. The toolkit auto-detects coordinate systems and handles missing `nCount_RNA` (computed from expression matrix), missing `nFeature_RNA` (computed from expression matrix), and missing `Area` (area filtering skipped) gracefully.
 
 ## Output
 
 ### Interactive (in-app)
 
-Three tabs with sub-tabs:
+Four tabs:
+
+**Run Summary tab:**
+- Bruker-style descriptive metrics table
+- Pre-QC / Post-QC toggle
+- Download CSV button
 
 **FOV QC tab:**
 - Flagged FOV spatial map
@@ -108,18 +116,40 @@ Three tabs with sub-tabs:
 - All-flags spatial map
 - Counts-over-space heatmap (viridis)
 
-### PDF report (8 pages)
+### PDF report (9 pages)
 
 | Page | Contents |
 |------|----------|
-| 1 | Combined summary: experiment, panel, FOV flags, cell flags, overall pass rate |
-| 2 | Flagged FOV map |
-| 3 | Signal loss plot |
-| 4 | Flagged FOV bias heatmap |
-| 5 | All-FOV bias heatmap |
-| 6 | Cell QC: count distribution histogram |
-| 7 | Cell QC: area distribution histogram |
-| 8 | Counts over space (viridis heatmap) |
+| 1 | Run Summary metrics table (Bruker-style) |
+| 2 | Combined summary: experiment, panel, FOV flags, cell flags, overall pass rate |
+| 3 | Flagged FOV map |
+| 4 | Signal loss plot |
+| 5 | Flagged FOV bias heatmap |
+| 6 | All-FOV bias heatmap |
+| 7 | Cell QC: count distribution histogram |
+| 8 | Cell QC: area distribution histogram |
+| 9 | Counts over space (viridis heatmap) |
+
+## Run Summary metrics
+
+| Metric | Definition |
+|--------|-----------|
+| Number of FOVs | Unique FOVs in the (scoped) cell set |
+| Total Tissue Area | Convex hull area of cell centroids (mm² or px²) |
+| Mean Single Cell Size | Mean of the `Area` metadata column |
+| Number of Cells in Final Analysis | Cell count under the current scope |
+| Total Transcripts Assigned to Cells | Sum of `nCount_RNA` across cells |
+| Mean / Max Transcripts per Cell | Central tendency of `nCount_RNA` |
+| Mean Unique Genes per Cell | Nonzero gene columns per cell |
+| Mean Transcripts per Area | Total transcripts / tissue area |
+| Mean Negative per Plex per Cell | Mean negative-probe count per cell / number of negative probes |
+| Mean False Codes per Plex per Cell | Same, for SystemControl probes |
+| SNR | Mean gene signal per probe / mean negative signal per probe |
+| QC Pass Rate | Fraction of cells passing all Cell and FOV QC flags |
+
+**Note on tissue area**: Convex hull is a reasonable approximation but will differ from methods based on bounding boxes or FOV-area sums. Numbers may not exactly match AtoMx-reported area figures.
+
+**Note on SNR**: Uses a standard signal-to-noise ratio. Bruker's own SNR formula is not published, so exact matches to Bruker reports are not guaranteed.
 
 ## QC thresholds
 
@@ -155,18 +185,23 @@ Count threshold defaults are panel-specific and update automatically when the pa
 
 ## Changelog
 
-### v0.2.0
-- Chunked expression matrix loading. Files now load in 5000-cell chunks, reducing peak memory usage on FAS laptops. Progress bar reports chunk number and running cell count during load.
-- Replaced viridis dependency with scales::viridis_pal() for the same colormap. Resolves S7 install failures reported on some machines.
+### v0.3.0
+- Added Run Summary tab as the first tab. Provides a Bruker-style descriptive metrics table with Pre-QC / Post-QC toggle and CSV export.
+- Chunked loader now preserves per-cell sums across Negative probe and SystemControl columns, enabling probe-level Run Summary metrics without noticeable memory impact.
+- Added Run Summary as page 1 of the PDF export.
+
+### v0.2.x
+- Chunked expression matrix loading. Files load in 5000-cell chunks, reducing peak memory usage on FAS laptops. Progress bar reports chunk number and running cell count during load.
+- Replaced viridis dependency with scales::viridis_pal() for the same colormap. Resolves S7 install failures on some machines.
 - Restored Hs_WTX (Human Whole Transcriptome, 18K) as a selectable panel with count threshold default of 100.
+- Increased max upload size from 500MB to 8GB to handle WTX-sized exprMat files.
 - FOV QC threshold defaults remain at 0.7 per Bioinformatics guidance.
-- Output verified identical to v0.1 on reference datasets.
 
 ## Roadmap
 
 - [x] Phase 1: FOV QC (signal loss + reporter bias)
 - [x] Phase 2: Cell-level QC (count + area thresholds)
-- [ ] Phase 3: Descriptive QC visualizations (spatially smoothed background)
+- [x] Phase 3: Run Summary (Bruker-style descriptive metrics)
 - [ ] Phase 4: Normalization preview
 
 ## References

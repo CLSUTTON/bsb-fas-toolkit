@@ -46,10 +46,16 @@ load_exprmat_chunked <- function(path, chunk_size = 5000, progress_fn = NULL) {
          paste(missing_cols, collapse = ", "))
   }
   
-  # Identify gene columns (drop negative probes, system controls, and meta cols)
-  drop_mask <- grepl("Negative", col_names) | grepl("SystemControl", col_names)
+  # Identify column categories:
+  #   - gene_cols: real biological probes (used for FOV/Cell QC)
+  #   - neg_cols:  negative probes (used for Run Summary metrics)
+  #   - fc_cols:   SystemControl / false-code columns (used for Run Summary metrics)
+  neg_mask  <- grepl("Negative",      col_names)
+  fc_mask   <- grepl("SystemControl", col_names)
   meta_or_special <- c("fov", "cell_ID", "cell")
-  gene_cols <- col_names[!drop_mask & !(col_names %in% meta_or_special)]
+  gene_cols <- col_names[!neg_mask & !fc_mask & !(col_names %in% meta_or_special)]
+  neg_cols  <- col_names[neg_mask]
+  fc_cols   <- col_names[fc_mask]
   
   if (length(gene_cols) == 0) {
     stop("No gene columns detected in exprMat file.")
@@ -57,6 +63,8 @@ load_exprmat_chunked <- function(path, chunk_size = 5000, progress_fn = NULL) {
   
   # Read and sparsify in chunks
   sparse_chunks <- list()
+  neg_sums_list <- list()   # per-cell sum across all negative probes
+  fc_sums_list  <- list()   # per-cell sum across all SystemControl probes
   chunk_idx   <- 1
   skip_rows   <- 1  # account for header row
   total_cells <- 0
@@ -88,6 +96,22 @@ load_exprmat_chunked <- function(path, chunk_size = 5000, progress_fn = NULL) {
     # Convert to sparse immediately, then release the dense chunk
     sparse_chunks[[chunk_idx]] <- Matrix::Matrix(gene_matrix, sparse = TRUE)
     
+    # Extract per-cell control sums (kept as named numeric vectors, tiny memory)
+    if (length(neg_cols) > 0) {
+      neg_mat <- as.matrix(chunk[, neg_cols, with = FALSE])
+      neg_sums <- rowSums(neg_mat)
+      names(neg_sums) <- cell_ids
+      neg_sums_list[[chunk_idx]] <- neg_sums
+      rm(neg_mat, neg_sums)
+    }
+    if (length(fc_cols) > 0) {
+      fc_mat <- as.matrix(chunk[, fc_cols, with = FALSE])
+      fc_sums <- rowSums(fc_mat)
+      names(fc_sums) <- cell_ids
+      fc_sums_list[[chunk_idx]] <- fc_sums
+      rm(fc_mat, fc_sums)
+    }
+    
     rm(chunk, gene_matrix, cell_ids)
     gc(verbose = FALSE)
     
@@ -109,8 +133,25 @@ load_exprmat_chunked <- function(path, chunk_size = 5000, progress_fn = NULL) {
   rm(sparse_chunks)
   gc(verbose = FALSE)
   
-  counts_final <- counts_final[order(rownames(counts_final)), , drop = FALSE]
-  counts_final
+  ord <- order(rownames(counts_final))
+  counts_final <- counts_final[ord, , drop = FALSE]
+  
+  # Combine control sums, aligned to the same cell order
+  neg_per_cell <- if (length(neg_sums_list) > 0) {
+    v <- unlist(neg_sums_list); v[rownames(counts_final)]
+  } else NULL
+  fc_per_cell  <- if (length(fc_sums_list) > 0) {
+    v <- unlist(fc_sums_list); v[rownames(counts_final)]
+  } else NULL
+  
+  list(
+    counts       = counts_final,
+    neg_per_cell = neg_per_cell,
+    fc_per_cell  = fc_per_cell,
+    n_neg_probes = length(neg_cols),
+    n_fc_probes  = length(fc_cols),
+    n_gene_cols  = length(gene_cols)
+  )
 }
 
 # -- Panel-specific default count thresholds ----------------------------------
@@ -296,6 +337,32 @@ ui <- fluidPage(
       tabsetPanel(id = "main_tabs", type = "pills",
         
         # ==============================================================
+        # TAB: Run Summary (Phase 3 - Bruker-style descriptive metrics)
+        # ==============================================================
+        tabPanel("Run Summary",
+          div(class = "card", style = "margin-top: 12px;",
+            h4("Run Summary"),
+            fluidRow(
+              column(6,
+                radioButtons("run_summary_scope", "Scope:",
+                             choices  = c("Post-QC (final analysis)" = "post",
+                                          "Pre-QC (raw run)"          = "pre"),
+                             selected = "post", inline = TRUE)
+              ),
+              column(6, style = "text-align: right; padding-top: 8px;",
+                downloadButton("download_summary_csv", "Download CSV",
+                               style = "background:#0f3460; color:white; border:none;")
+              )
+            ),
+            br(),
+            tableOutput("run_summary_table"),
+            helpText("Metrics computed from the loaded expression matrix, metadata, ",
+                     "and (if present) negative probe / SystemControl columns. Tissue area ",
+                     "is estimated as the convex hull of cell centroids.")
+          )
+        ),
+        
+        # ==============================================================
         # TAB: FOV QC
         # ==============================================================
         tabPanel("FOV QC",
@@ -363,7 +430,17 @@ server <- function(input, output, session) {
     fov         = NULL,     # fov vector
     nCount_RNA  = NULL,     # total counts per cell
     cell_area   = NULL,     # cell areas
-    total_cells = NULL      # total cell count
+    total_cells = NULL,     # total cell count
+    
+    # Control-column counts for Run Summary (Phase 3)
+    neg_per_cell = NULL,    # per-cell sum across all Negative probes
+    fc_per_cell  = NULL,    # per-cell sum across all SystemControl probes
+    n_neg_probes = NULL,    # number of negative probes in exprMat
+    n_fc_probes  = NULL,    # number of SystemControl probes in exprMat
+    n_gene_cols  = NULL,    # number of gene columns loaded
+    
+    # Gene-nonzero counts per cell (for "unique genes per cell" metric)
+    n_features   = NULL
   )
   
   # -- Update default count threshold when panel changes -----------------------
@@ -403,7 +480,7 @@ server <- function(input, output, session) {
         # Chunked load: reads in 5000-cell chunks, converts each to sparse
         # immediately so peak memory is chunk_size * n_genes instead of
         # n_cells * n_genes dense. Same result as a single fread + sparsify.
-        counts.final <- load_exprmat_chunked(
+        loader_out <- load_exprmat_chunked(
           path       = input$exprmat_file$datapath,
           chunk_size = 5000,
           progress_fn = function(chunk_idx, cells_so_far) {
@@ -412,6 +489,13 @@ server <- function(input, output, session) {
                                         chunk_idx, " (", cells_so_far, " cells so far)..."))
           }
         )
+        counts.final     <- loader_out$counts
+        rv$neg_per_cell  <- loader_out$neg_per_cell
+        rv$fc_per_cell   <- loader_out$fc_per_cell
+        rv$n_neg_probes  <- loader_out$n_neg_probes
+        rv$n_fc_probes   <- loader_out$n_fc_probes
+        rv$n_gene_cols   <- loader_out$n_gene_cols
+        rm(loader_out); gc(verbose = FALSE)
         
         # --- Load metadata ---
         incProgress(0.15, detail = "Loading metadata...")
@@ -448,6 +532,14 @@ server <- function(input, output, session) {
           rv$nCount_RNA <- obs$nCount_RNA
         } else {
           rv$nCount_RNA <- Matrix::rowSums(counts.final)
+        }
+        
+        # Unique genes per cell: nonzero column count per row of the sparse matrix.
+        # Uses nFeature_RNA from metadata if present, else computes from counts.
+        if ("nFeature_RNA" %in% colnames(obs)) {
+          rv$n_features <- obs$nFeature_RNA
+        } else {
+          rv$n_features <- Matrix::rowSums(counts.final > 0)
         }
         
         # Extract cell area if present
@@ -520,6 +612,164 @@ server <- function(input, output, session) {
   })
   
   # ============================================================================
+  # REACTIVE: Run Summary metrics (Bruker-style descriptive table)
+  # Recomputes when cell QC thresholds or the pre/post-QC toggle change.
+  # ============================================================================
+  run_summary <- reactive({
+    req(rv$ready, rv$nCount_RNA, rv$xy)
+    
+    qc <- cell_qc()
+    
+    # Cell inclusion mask depends on toggle
+    use_post_qc <- (isTRUE(input$run_summary_scope == "post"))
+    keep_mask <- if (use_post_qc) !qc$flag_any else rep(TRUE, qc$n_cells)
+    
+    counts_vec   <- rv$nCount_RNA[keep_mask]
+    features_vec <- if (!is.null(rv$n_features)) rv$n_features[keep_mask] else NA_real_
+    area_vec     <- if (!is.null(rv$cell_area))  rv$cell_area[keep_mask]  else NA_real_
+    neg_vec      <- if (!is.null(rv$neg_per_cell)) rv$neg_per_cell[keep_mask] else NA_real_
+    fc_vec       <- if (!is.null(rv$fc_per_cell))  rv$fc_per_cell[keep_mask]  else NA_real_
+    xy_kept      <- rv$xy[keep_mask, , drop = FALSE]
+    fov_kept     <- rv$fov[keep_mask]
+    
+    n_fovs <- length(unique(fov_kept))
+    
+    # Tissue area via convex hull of cell centroids.
+    # Coordinates are stored under x_slide_mm / y_slide_mm even when the source
+    # was pixel coordinates (aliased at load time). We report the raw hull area
+    # and label the units accordingly.
+    if (all(c("x_slide_mm", "y_slide_mm") %in% colnames(rv$obs))) {
+      area_unit <- "mm^2"
+      unit_label <- "mm2"
+    } else {
+      # Coordinates were global pixel; hull area will be in px^2, not mm^2
+      area_unit <- "px^2"
+      unit_label <- "px2"
+    }
+    
+    hull_idx <- tryCatch(
+      grDevices::chull(xy_kept[, 1], xy_kept[, 2]),
+      error = function(e) integer(0)
+    )
+    
+    if (length(hull_idx) >= 3) {
+      hx <- xy_kept[hull_idx, 1]
+      hy <- xy_kept[hull_idx, 2]
+      # Shoelace formula for polygon area
+      tissue_area <- 0.5 * abs(sum(hx * c(hy[-1], hy[1]) - c(hx[-1], hx[1]) * hy))
+    } else {
+      tissue_area <- NA_real_
+    }
+    
+    # Aggregate metrics (with defensive NA handling)
+    n_cells_final       <- length(counts_vec)
+    total_transcripts   <- sum(counts_vec, na.rm = TRUE)
+    mean_tx_per_cell    <- if (n_cells_final > 0) mean(counts_vec, na.rm = TRUE) else NA_real_
+    max_tx_per_cell     <- if (n_cells_final > 0) max(counts_vec, na.rm = TRUE)  else NA_real_
+    mean_genes_per_cell <- if (n_cells_final > 0 && !all(is.na(features_vec))) {
+                             mean(features_vec, na.rm = TRUE)
+                           } else NA_real_
+    mean_cell_size      <- if (n_cells_final > 0 && !all(is.na(area_vec))) {
+                             mean(area_vec, na.rm = TRUE)
+                           } else NA_real_
+    mean_tx_per_area    <- if (!is.na(tissue_area) && tissue_area > 0) {
+                             total_transcripts / tissue_area
+                           } else NA_real_
+    
+    # Mean Negative per Plex per Cell:
+    #   average negative-probe count per cell, divided by number of negative probes
+    mean_neg_per_plex <- if (!is.null(rv$neg_per_cell) && rv$n_neg_probes > 0 && n_cells_final > 0) {
+      mean(neg_vec, na.rm = TRUE) / rv$n_neg_probes
+    } else NA_real_
+    
+    # Mean False Codes per Plex per Cell:
+    #   same idea with SystemControl probes
+    mean_fc_per_plex <- if (!is.null(rv$fc_per_cell) && rv$n_fc_probes > 0 && n_cells_final > 0) {
+      mean(fc_vec, na.rm = TRUE) / rv$n_fc_probes
+    } else NA_real_
+    
+    # SNR: mean transcripts per cell over mean negative-probe-per-plex per cell.
+    # Common Bruker-style SNR definition.
+    snr <- if (!is.na(mean_neg_per_plex) && mean_neg_per_plex > 0) {
+      mean_tx_per_cell / (mean_neg_per_plex * rv$n_gene_cols)
+    } else if (!is.null(rv$neg_per_cell) && n_cells_final > 0) {
+      # Fallback: mean gene signal per probe over mean negative signal per probe
+      mean_gene_per_plex <- mean_tx_per_cell / max(rv$n_gene_cols, 1)
+      if (!is.na(mean_gene_per_plex) && mean_neg_per_plex > 0) mean_gene_per_plex / mean_neg_per_plex else NA_real_
+    } else NA_real_
+    
+    # QC pass/fail bonus row
+    pct_pass <- if (qc$n_cells > 0) 100 * sum(!qc$flag_any) / qc$n_cells else NA_real_
+    
+    list(
+      scope             = if (use_post_qc) "Post-QC" else "Pre-QC",
+      expt_name         = rv$expt_name,
+      panel             = input$panel,
+      n_fovs            = n_fovs,
+      tissue_area       = tissue_area,
+      tissue_area_unit  = area_unit,
+      tissue_area_label = unit_label,
+      mean_cell_size    = mean_cell_size,
+      n_cells_final     = n_cells_final,
+      total_transcripts = total_transcripts,
+      mean_tx_per_cell  = mean_tx_per_cell,
+      max_tx_per_cell   = max_tx_per_cell,
+      mean_genes_per_cell = mean_genes_per_cell,
+      mean_tx_per_area  = mean_tx_per_area,
+      mean_neg_per_plex = mean_neg_per_plex,
+      mean_fc_per_plex  = mean_fc_per_plex,
+      snr               = snr,
+      pct_pass          = pct_pass
+    )
+  })
+  
+  # Helper to build a data.frame view of the summary for rendering and export
+  run_summary_df <- reactive({
+    rs <- run_summary()
+    fmt_int <- function(x) if (is.na(x)) "NA" else formatC(round(x), format = "d", big.mark = ",")
+    fmt_num <- function(x, digits = 2) if (is.na(x)) "NA" else formatC(x, format = "f", digits = digits, big.mark = ",")
+    fmt_pct <- function(x) if (is.na(x)) "NA" else paste0(formatC(x, format = "f", digits = 1), "%")
+    
+    data.frame(
+      Metric = c(
+        paste0("Experiment (", rs$scope, ")"),
+        "Panel",
+        "Number of FOVs",
+        paste0("Total Tissue Area (", rs$tissue_area_unit, ")"),
+        "Mean Single Cell Size (px^2)",
+        "Number of Cells in Final Analysis",
+        "Total Transcripts Assigned to Cells",
+        "Mean Transcripts per Cell",
+        "Maximum Transcripts per Cell",
+        "Mean Unique Genes per Cell",
+        paste0("Mean Transcripts per ", rs$tissue_area_unit),
+        "Mean Negative per Plex per Cell",
+        "Mean False Codes per Plex per Cell",
+        "SNR",
+        "QC Pass Rate"
+      ),
+      Value = c(
+        as.character(rs$expt_name),
+        as.character(rs$panel),
+        fmt_int(rs$n_fovs),
+        fmt_num(rs$tissue_area, digits = 2),
+        fmt_num(rs$mean_cell_size, digits = 2),
+        fmt_int(rs$n_cells_final),
+        fmt_int(rs$total_transcripts),
+        fmt_int(rs$mean_tx_per_cell),
+        fmt_int(rs$max_tx_per_cell),
+        fmt_int(rs$mean_genes_per_cell),
+        fmt_num(rs$mean_tx_per_area, digits = 2),
+        fmt_num(rs$mean_neg_per_plex, digits = 4),
+        fmt_num(rs$mean_fc_per_plex,  digits = 4),
+        fmt_num(rs$snr, digits = 2),
+        fmt_pct(rs$pct_pass)
+      ),
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  # ============================================================================
   # STATUS MESSAGE
   # ============================================================================
   output$status <- renderUI({
@@ -531,6 +781,28 @@ server <- function(input, output, session) {
       NULL
     }
   })
+  
+  # ============================================================================
+  # RUN SUMMARY TAB OUTPUTS (Phase 3 - Bruker-style descriptive metrics)
+  # ============================================================================
+  
+  output$run_summary_table <- renderTable({
+    req(rv$ready)
+    df <- run_summary_df()
+    df
+  }, striped = TRUE, hover = TRUE, width = "100%", align = "lr")
+  
+  output$download_summary_csv <- downloadHandler(
+    filename = function() {
+      base <- if (!is.null(rv$expt_name)) rv$expt_name else "run"
+      paste0(base, "_RunSummary_",
+             if (isTRUE(input$run_summary_scope == "post")) "postQC" else "preQC",
+             ".csv")
+    },
+    content = function(file) {
+      write.csv(run_summary_df(), file, row.names = FALSE)
+    }
+  )
   
   # ============================================================================
   # FOV QC TAB OUTPUTS (Phase 1 - unchanged logic)
@@ -865,7 +1137,29 @@ server <- function(input, output, session) {
     tryCatch({
       pdf(output_pdf, width = 14, height = 10)
       
-      # ---- Page 1: Combined Summary ----
+      # ---- Page 1: Run Summary (Bruker-style descriptive table) ----
+      rs_df <- run_summary_df()
+      rs    <- run_summary()
+      
+      plot.new()
+      text(0.5, 0.95, "Run Summary", cex = 2.2, font = 2)
+      text(0.5, 0.89, paste("Experiment:", expt_name), cex = 1.3, font = 2)
+      text(0.5, 0.85, paste("Panel:", panel, "   |   Scope:", rs$scope), cex = 1.0)
+      
+      # Render the table as text lines (avoids gridExtra dependency)
+      n_rows <- nrow(rs_df)
+      y_top  <- 0.78
+      y_bot  <- 0.08
+      y_step <- (y_top - y_bot) / max(n_rows - 1, 1)
+      for (i in seq_len(n_rows)) {
+        y_i <- y_top - (i - 1) * y_step
+        text(0.28, y_i, rs_df$Metric[i], cex = 0.95, adj = c(1, 0.5))
+        text(0.32, y_i, rs_df$Value[i],  cex = 0.95, adj = c(0, 0.5), font = 2)
+      }
+      text(0.5, 0.03, "Run Summary metrics: derived from expression matrix + metadata + control probes",
+           cex = 0.75, col = "grey50")
+      
+      # ---- Page 2: Combined Summary ----
       plot.new()
       text(0.5, 0.95, "CosMx QC Toolkit Report", cex = 2.2, font = 2)
       text(0.5, 0.87, paste("Experiment:", expt_name), cex = 1.4, font = 2)
