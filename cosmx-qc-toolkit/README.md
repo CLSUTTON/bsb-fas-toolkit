@@ -188,6 +188,9 @@ Count threshold defaults are panel-specific and update automatically when the pa
 
 ## Changelog
 
+### v0.3.2
+- Added an explicit WTX runtime-expectations warning. Selecting Hs_WTX or Mm_WTX and clicking Run QC now opens a modal describing expected runtimes (60-120 min load, 30-60 min FOV QC) and RAM requirements (32 GB minimum, 64 GB preferred). The warning fires once per session per WTX panel selection. Non-WTX panels are unaffected.
+
 ### v0.3.1
 - Added Mm_WTX (Mouse Whole Transcriptome, ~21K-plex) as a selectable panel with count threshold default of 100.
 - Progress messages during loading and FOV QC now include elapsed time, so long-running WTX jobs can be distinguished from a hung session at a glance.

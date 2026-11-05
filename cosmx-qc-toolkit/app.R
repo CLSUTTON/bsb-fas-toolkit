@@ -442,8 +442,19 @@ server <- function(input, output, session) {
     n_gene_cols  = NULL,    # number of gene columns loaded
     
     # Gene-nonzero counts per cell (for "unique genes per cell" metric)
-    n_features   = NULL
+    n_features   = NULL,
+    
+    # WTX acknowledgement: user has accepted the runtime warning for the
+    # currently-selected panel during this session. Reset when panel changes.
+    wtx_ack      = FALSE
   )
+  
+  # Reset the WTX acknowledgement if the user switches panels, so switching
+  # between WTX and a different panel does not accidentally skip the warning
+  # on the next WTX selection.
+  observeEvent(input$panel, {
+    rv$wtx_ack <- FALSE
+  }, ignoreInit = TRUE)
   
   # -- Update default count threshold when panel changes -----------------------
   observeEvent(input$panel, {
@@ -457,6 +468,38 @@ server <- function(input, output, session) {
   observeEvent(input$run_qc, {
     
     req(input$exprmat_file, input$metadata_file)
+    
+    # Gate WTX panels behind an explicit runtime-expectations warning.
+    # The ack flag is reset when the user changes panels, so this fires
+    # exactly once per WTX panel selection.
+    is_wtx <- isTRUE(input$panel %in% c("Hs_WTX", "Mm_WTX"))
+    if (is_wtx && !isTRUE(rv$wtx_ack)) {
+      showModal(modalDialog(
+        title = "WTX panel: runtime expectations",
+        tags$p(tags$b("You have selected a Whole Transcriptome (WTX) panel.")),
+        tags$p("WTX panels have roughly 3x the gene count of 6K panels, which has ",
+               "real consequences for how long QC takes to run and what machine ",
+               "it can realistically run on:"),
+        tags$ul(
+          tags$li(tags$b("Loading phase:"), " expect 60 to 120 minutes on a typical FAS laptop."),
+          tags$li(tags$b("FOV QC compute:"), " can add another 30 to 60 minutes on top of load."),
+          tags$li(tags$b("RAM:"), " 32 GB minimum recommended; 64 GB preferred. Lower-RAM ",
+                  "machines may finish eventually but will be very slow or may fail.")
+        ),
+        tags$p("Progress messages show elapsed time so you can tell the app is still ",
+               "working. Do not close RStudio until the run completes."),
+        tags$p(tags$b("Recommendation:"), " start the run when you can leave the machine ",
+               "unattended (lunch, overnight, etc.) and return to the results when it is done."),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton("wtx_proceed", "Proceed with WTX run",
+                       style = "background:#0f3460; color:white; border:none;")
+        ),
+        easyClose = FALSE,
+        size = "m"
+      ))
+      return(invisible(NULL))
+    }
     
     rv$ready <- FALSE
     rv$res   <- NULL
@@ -590,6 +633,16 @@ server <- function(input, output, session) {
         showNotification(paste("Error:", e$message), type = "error", duration = 10)
       })
     })
+  })
+  
+  # -- WTX modal: Proceed button records acknowledgement and closes the dialog.
+  # The user then clicks Run QC a second time; the run_qc observer sees the
+  # acknowledgement and skips straight to the real work.
+  observeEvent(input$wtx_proceed, {
+    rv$wtx_ack <- TRUE
+    removeModal()
+    showNotification("WTX run authorized for this session. Click Run QC again to start.",
+                     type = "message", duration = 8)
   })
   
   # ============================================================================
