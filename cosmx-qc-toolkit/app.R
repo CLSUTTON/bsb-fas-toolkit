@@ -165,7 +165,8 @@ panel_count_defaults <- list(
   Hs_6k    = 50,   # 6K
   Hs_WTX   = 100,  # WTX (Human Whole Transcriptome, 18K-plex)
   Mm_Neuro = 20,   # 1K
-  Mm_UCC   = 20    # 1K
+  Mm_UCC   = 20,   # 1K
+  Mm_WTX   = 100   # WTX (Mouse Whole Transcriptome, ~21K-plex)
 )
 
 # ============================================================================
@@ -288,7 +289,8 @@ ui <- fluidPage(
                                 "Human Universal Cell Char (1K)" = "Hs_UCC",
                                 "Human Immuno-Oncology (100-plex)" = "Hs_IO",
                                 "Mouse Neuroscience (1K)" = "Mm_Neuro",
-                                "Mouse Universal Cell Char (1K)" = "Mm_UCC"),
+                                "Mouse Universal Cell Char (1K)" = "Mm_UCC",
+                                "Mouse Whole Transcriptome (WTX)" = "Mm_WTX"),
                     selected = "Hs_6k")
       ),
       
@@ -477,6 +479,17 @@ server <- function(input, output, session) {
         # Extract experiment name from uploaded filename
         rv$expt_name <- sub("_exprMat_file\\.csv(\\.gz)?$", "", input$exprmat_file$name)
         
+        # Helper: format elapsed seconds as "Xm Ys" (used by long-running WTX runs
+        # so users can distinguish "still working" from "hung")
+        fmt_elapsed <- function(start_time) {
+          secs <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+          mins <- floor(secs / 60)
+          rem  <- round(secs - mins * 60)
+          if (mins > 0) paste0(mins, "m ", rem, "s") else paste0(rem, "s")
+        }
+        
+        load_start <- Sys.time()
+        
         # Chunked load: reads in 5000-cell chunks, converts each to sparse
         # immediately so peak memory is chunk_size * n_genes instead of
         # n_cells * n_genes dense. Same result as a single fread + sparsify.
@@ -486,7 +499,10 @@ server <- function(input, output, session) {
           progress_fn = function(chunk_idx, cells_so_far) {
             setProgress(value  = NULL,
                         detail = paste0("Loading expression matrix: chunk ",
-                                        chunk_idx, " (", cells_so_far, " cells so far)..."))
+                                        chunk_idx, " (",
+                                        format(cells_so_far, big.mark = ","),
+                                        " cells, ", fmt_elapsed(load_start),
+                                        " elapsed)..."))
           }
         )
         counts.final     <- loader_out$counts
@@ -550,7 +566,11 @@ server <- function(input, output, session) {
         }
         
         # --- Run FOV QC ---
-        incProgress(0.2, detail = "Running FOV QC algorithm (this takes a few minutes)...")
+        fovqc_start <- Sys.time()
+        incProgress(0.2, detail = paste0(
+          "Running FOV QC algorithm (WTX runs can take 30+ min; ",
+          "load phase took ", fmt_elapsed(load_start), ")..."
+        ))
         res <- runFOVQC(counts     = counts.final,
                         xy          = xy,
                         fov         = fov,
@@ -558,7 +578,8 @@ server <- function(input, output, session) {
                         max_prop_loss        = input$max_prop_loss,
                         max_totalcounts_loss = input$max_totalcounts_loss)
         
-        incProgress(0.45, detail = "Generating results...")
+        incProgress(0.45, detail = paste0("Generating results (FOV QC took ",
+                                           fmt_elapsed(fovqc_start), ")..."))
         
         rv$res   <- res
         rv$ready <- TRUE

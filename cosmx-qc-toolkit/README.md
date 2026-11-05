@@ -21,7 +21,7 @@ Flags individual cells that should be excluded from downstream analysis:
 1. **Low count cells**: Cells below a minimum total count threshold (panel-specific defaults, auto-capped at the 10th percentile to prevent over-filtering).
 2. **Oversized cells**: Cells exceeding a maximum area threshold, likely resulting from segmentation errors.
 
-Cell QC thresholds update reactively — adjust them after the initial run and see results instantly without re-running the FOV QC computation.
+Cell QC thresholds update reactively. Adjust them after the initial run and see results instantly without re-running the FOV QC computation.
 
 ### Combined QC Summary
 Merges FOV-level and cell-level flags into a single report with color-coded severity badges, spatial flag maps, and a total counts-over-space visualization.
@@ -54,7 +54,7 @@ Before running the toolkit, export two flat files from AtoMx SIP:
 
 - R 4.0+ with RStudio
 - Internet connection on first run (downloads FOV QC functions and barcode maps from GitHub)
-- RAM: 16GB minimum for 1K panels, 32GB recommended for 6K panels
+- RAM: 16GB minimum for 1K panels, 32GB recommended for 6K panels, 64GB recommended for WTX
 
 The following packages are auto-installed on first run:
 
@@ -73,11 +73,14 @@ The following packages are auto-installed on first run:
 | `Hs_IO`    | Human Immuno-Oncology (100-plex)           | 20                     |
 | `Hs_UCC`   | Human Universal Cell Characterization (1K) | 20                     |
 | `Hs_6k`    | Human 6K Discovery                         | 50                     |
-| `Hs_WTX`   | Human Whole Transcriptome (18K)            | 100                    |
+| `Hs_WTX`   | Human Whole Transcriptome (~18K)           | 100                    |
 | `Mm_Neuro` | Mouse Neuroscience (1K)                    | 20                     |
 | `Mm_UCC`   | Mouse Universal Cell Characterization (1K) | 20                     |
+| `Mm_WTX`   | Mouse Whole Transcriptome (~21K)           | 100                    |
 
 **Note**: Custom and RBS panels are not currently supported by the upstream barcode map file. Contact Bioinformatics for the appropriate barcode map if using those panels.
+
+**Note on WTX runtime**: WTX panels (Hs_WTX and Mm_WTX) have ~3x the gene count of 6K panels and can take significantly longer to load and compute. Loading phase alone can be 20-40 minutes on a FAS laptop; full FOV QC can push past an hour. Progress messages now show elapsed time so you can distinguish "still working" from "hung."
 
 ## Input files
 
@@ -135,7 +138,7 @@ Four tabs:
 | Metric | Definition |
 |--------|-----------|
 | Number of FOVs | Unique FOVs in the (scoped) cell set |
-| Total Tissue Area | Convex hull area of cell centroids (mm² or px²) |
+| Total Tissue Area | Convex hull area of cell centroids (mm^2 or px^2) |
 | Mean Single Cell Size | Mean of the `Area` metadata column |
 | Number of Cells in Final Analysis | Cell count under the current scope |
 | Total Transcripts Assigned to Cells | Sum of `nCount_RNA` across cells |
@@ -181,9 +184,13 @@ Count threshold defaults are panel-specific and update automatically when the pa
 - **Cell flag rate 10-20%**: Worth investigating. Check if flags are spatially clustered (technical) or dispersed (biological).
 - **Cell flag rate >20%**: Likely a tissue quality or segmentation issue. Review in AtoMx tissue viewer.
 - **Counts-over-space plot**: Look for sharp FOV-boundary artifacts (technical) vs smooth spatial gradients (biological). Smooth gradients are expected.
-- **10th percentile cap triggered**: Indicates the default threshold would flag >10% of cells. The dataset may have generally lower signal — check tissue quality.
+- **10th percentile cap triggered**: Indicates the default threshold would flag >10% of cells. The dataset may have generally lower signal. Check tissue quality.
 
 ## Changelog
+
+### v0.3.1
+- Added Mm_WTX (Mouse Whole Transcriptome, ~21K-plex) as a selectable panel with count threshold default of 100.
+- Progress messages during loading and FOV QC now include elapsed time, so long-running WTX jobs can be distinguished from a hung session at a glance.
 
 ### v0.3.0
 - Added Run Summary tab as the first tab. Provides a Bruker-style descriptive metrics table with Pre-QC / Post-QC toggle and CSV export.
@@ -193,7 +200,7 @@ Count threshold defaults are panel-specific and update automatically when the pa
 ### v0.2.x
 - Chunked expression matrix loading. Files load in 5000-cell chunks, reducing peak memory usage on FAS laptops. Progress bar reports chunk number and running cell count during load.
 - Replaced viridis dependency with scales::viridis_pal() for the same colormap. Resolves S7 install failures on some machines.
-- Restored Hs_WTX (Human Whole Transcriptome, 18K) as a selectable panel with count threshold default of 100.
+- Restored Hs_WTX (Human Whole Transcriptome, ~18K) as a selectable panel with count threshold default of 100.
 - Increased max upload size from 500MB to 8GB to handle WTX-sized exprMat files.
 - FOV QC threshold defaults remain at 0.7 per Bioinformatics guidance.
 
